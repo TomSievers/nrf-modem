@@ -511,9 +511,3 @@ struct Semaphore {
     max_value: u32,
     current_value: AtomicU32,
 }
-
-/// Check if executing in interrupt context.
-#[no_mangle]
-pub extern "C" fn nrf_modem_os_is_in_isr() -> bool {
-    cortex_m::peripheral::SCB::vect_active() != cortex_m::peripheral::scb::VectActive::ThreadMode
-}
