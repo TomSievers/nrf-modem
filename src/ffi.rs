@@ -123,10 +123,6 @@ pub extern "C" fn nrf_modem_os_busywait(usec: i32) {
 /// - -NRF_ESHUTDOWN – Modem is not initialized, or was shut down.
 #[no_mangle]
 pub unsafe extern "C" fn nrf_modem_os_timedwait(_context: u32, timeout: *mut i32) -> i32 {
-    if nrf_modem_os_is_in_isr() {
-        return -(nrfxlib_sys::NRF_EPERM as i32);
-    }
-
     if !nrfxlib_sys::nrf_modem_is_initialized() {
         return -(nrfxlib_sys::NRF_ESHUTDOWN as i32);
     }
