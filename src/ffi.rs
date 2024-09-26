@@ -519,7 +519,26 @@ struct Semaphore {
     current_value: AtomicU32,
 }
 
+// External function to check if the current irqn is a 
+// task irqn that makes use of the modem.
+#[cfg(feature = "experimental-rtic-compat")]
+extern "Rust" {
+    fn is_rtic_task_modem_task_isr(irqn: u8) -> bool;
+}
+
+/// Check if executing in specific interrupt context.
+#[cfg(feature = "experimental-rtic-compat")]
+#[no_mangle]
+pub extern "C" fn nrf_modem_os_is_in_isr() -> bool {
+    match cortex_m::peripheral::SCB::vect_active() {
+        cortex_m::peripheral::scb::VectActive::ThreadMode => false,
+        cortex_m::peripheral::scb::VectActive::Exception(_) => true,
+        cortex_m::peripheral::scb::VectActive::Interrupt { irqn } => unsafe { !is_rtic_task_modem_task_isr(irqn) } 
+    }
+}
+
 /// Check if executing in interrupt context.
+#[cfg(not(feature = "experimental-rtic-compat"))]
 #[no_mangle]
 pub extern "C" fn nrf_modem_os_is_in_isr() -> bool {
     cortex_m::peripheral::SCB::vect_active() != cortex_m::peripheral::scb::VectActive::ThreadMode
