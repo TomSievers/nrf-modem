@@ -1,12 +1,15 @@
 use crate::{
+    dns,
     error::Error,
-    socket::{Socket, SocketFamily, SocketProtocol, SocketType, SplitSocketHandle},
+    socket::{
+        CipherSuite, PeerVerification, Socket, SocketFamily, SocketOption, SocketProtocol,
+        SocketType, SplitSocketHandle,
+    },
     CancellationToken, LteLink,
 };
 use core::net::SocketAddr;
 
-/// A TCP stream that is connected to another endpoint
-pub struct TcpStream {
+pub struct TlsStream {
     inner: Socket,
 }
 
@@ -103,18 +106,67 @@ macro_rules! impl_write {
     };
 }
 
-impl TcpStream {
-    /// Connect a TCP stream to the given address
-    pub async fn connect(addr: SocketAddr) -> Result<Self, Error> {
-        Self::connect_with_cancellation(addr, &Default::default()).await
+impl TlsStream {
+    /// Connect an encrypted TCP stream to the given address
+    ///
+    /// This function attempts to connect to the given `hostname` and `port` using the specified
+    /// security parameters.
+    ///
+    /// - `hostname`: The hostname of the server to connect to.
+    /// - `port`: The port number of the server to connect to.
+    /// - `peer_verify`: The peer verification policy to apply. Determines how the connection verifies the server's identity.
+    /// - `security_tags`: A slice of [security tag](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/libraries/modem/modem_key_mgmt.html) identifiers containing security elements.
+    /// - `ciphers`: An optional slice of IANA cipher suite identifiers to use for the connection. If `None`, the default set of ciphers is used.
+    /// - `resume_sessions`: Enable TLS session tickets, managed by the modem.
+    pub async fn connect(
+        hostname: &str,
+        port: u16,
+        peer_verify: PeerVerification,
+        security_tags: &[u32],
+        ciphers: Option<&[CipherSuite]>,
+        resume_sessions: bool,
+    ) -> Result<Self, Error> {
+        Self::connect_with_cancellation(
+            hostname,
+            port,
+            peer_verify,
+            security_tags,
+            ciphers,
+            resume_sessions,
+            &Default::default(),
+        )
+        .await
     }
 
-    /// Connect a TCP stream to the given address
+    /// Connect an encrypted TCP stream to the given address
+    ///
+    /// This function attempts to connect to the given `hostname` and `port` using the specified
+    /// security parameters.
+    ///
+    /// - `hostname`: The hostname of the server to connect to.
+    /// - `port`: The port number of the server to connect to.
+    /// - `peer_verify`: The peer verification policy to apply. Determines how the connection verifies the server's identity.
+    /// - `security_tags`: A slice of [security tag](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/libraries/modem/modem_key_mgmt.html) identifiers containing security elements.
+    /// - `ciphers`: An optional slice of IANA cipher suite identifiers to use for the connection. If `None`, the default set of ciphers is used.
+    /// - `resume_sessions`: Enable TLS session tickets, managed by the modem.
+    /// - `token`: A [`CancellationToken`] that can be used to cancel the connection attempt.
     pub async fn connect_with_cancellation(
-        addr: SocketAddr,
+        hostname: &str,
+        port: u16,
+        peer_verify: PeerVerification,
+        security_tags: &[u32],
+        ciphers: Option<&[CipherSuite]>,
+        resume_sessions: bool,
         token: &CancellationToken,
     ) -> Result<Self, Error> {
+        if security_tags.is_empty() {
+            return Err(Error::NoSecurityTag);
+        }
+
         let lte_link = LteLink::new().await?;
+
+        let ip = dns::get_host_by_name_with_cancellation(hostname, token).await?;
+        let addr = SocketAddr::from((ip, port));
 
         token.as_result()?;
 
@@ -123,16 +175,25 @@ impl TcpStream {
             SocketAddr::V6(_) => SocketFamily::Ipv6,
         };
 
-        let socket = Socket::create(family, SocketType::Stream, SocketProtocol::Tcp).await?;
+        let socket = Socket::create(family, SocketType::Stream, SocketProtocol::Tls1v2).await?;
+        socket.set_option(SocketOption::TlsPeerVerify(peer_verify.as_integer()))?;
+        socket.set_option(SocketOption::TlsSessionCache(resume_sessions as _))?;
+        socket.set_option(SocketOption::TlsTagList(security_tags))?;
+        socket.set_option(SocketOption::TlsHostName(hostname))?;
+        if let Some(ciphers) = ciphers {
+            socket.set_option(SocketOption::TlsCipherSuiteList(unsafe {
+                core::slice::from_raw_parts(ciphers.as_ptr() as *const i32, ciphers.len())
+            }))?;
+        }
 
         match unsafe { socket.connect(addr, token).await } {
             Ok(_) => {
                 lte_link.deactivate().await?;
-                Ok(TcpStream { inner: socket })
+                Ok(TlsStream { inner: socket })
             }
             Err(e) => {
-                lte_link.deactivate().await?;
                 socket.deactivate().await?;
+                lte_link.deactivate().await?;
                 Err(e)
             }
         }
@@ -148,22 +209,22 @@ impl TcpStream {
     }
 
     /// Split the stream into an owned read and write half
-    pub async fn split_owned(self) -> Result<(OwnedTcpReadStream, OwnedTcpWriteStream), Error> {
+    pub async fn split_owned(self) -> Result<(OwnedTlsReadStream, OwnedTlsWriteStream), Error> {
         let (read_split, write_split) = self.inner.split().await?;
 
         Ok((
-            OwnedTcpReadStream { stream: read_split },
-            OwnedTcpWriteStream {
+            OwnedTlsReadStream { stream: read_split },
+            OwnedTlsWriteStream {
                 stream: write_split,
             },
         ))
     }
 
-    /// Split the stream into a borrowed read and write half
-    pub fn split(&self) -> (TcpReadStream<'_>, TcpWriteStream<'_>) {
+    /// Split the stream into an owned read and write half
+    pub fn split(&self) -> (TlsReadStream<'_>, TlsWriteStream<'_>) {
         (
-            TcpReadStream { stream: self },
-            TcpWriteStream { stream: self },
+            TlsReadStream { socket: self },
+            TlsWriteStream { socket: self },
         )
     }
 
@@ -178,48 +239,48 @@ impl TcpStream {
     }
 }
 
-crate::embedded_io_macros::impl_error_trait!(TcpStream, Error, <>);
-crate::embedded_io_macros::impl_read_trait!(TcpStream, <>);
-crate::embedded_io_macros::impl_write_trait!(TcpStream, <>);
+crate::embedded_io_macros::impl_error_trait!(TlsStream, Error, <>);
+crate::embedded_io_macros::impl_read_trait!(TlsStream, <>);
+crate::embedded_io_macros::impl_write_trait!(TlsStream, <>);
 
-/// A borrowed read half of a TCP stream
-pub struct TcpReadStream<'a> {
-    stream: &'a TcpStream,
+/// A borrowed read half of an encrypted TCP stream
+pub struct TlsReadStream<'a> {
+    socket: &'a TlsStream,
 }
 
-impl TcpReadStream<'_> {
+impl TlsReadStream<'_> {
     fn socket(&self) -> &Socket {
-        &self.stream.inner
+        &self.socket.inner
     }
 
     impl_receive!();
 }
 
-crate::embedded_io_macros::impl_error_trait!(TcpReadStream<'a>, Error, <'a>);
-crate::embedded_io_macros::impl_read_trait!(TcpReadStream<'a>, <'a>);
+crate::embedded_io_macros::impl_error_trait!(TlsReadStream<'a>, Error, <'a>);
+crate::embedded_io_macros::impl_read_trait!(TlsReadStream<'a>, <'a>);
 
-/// A borrowed write half of a TCP stream
-pub struct TcpWriteStream<'a> {
-    stream: &'a TcpStream,
+/// A borrowed write half of an encrypted TCP stream
+pub struct TlsWriteStream<'a> {
+    socket: &'a TlsStream,
 }
 
-impl TcpWriteStream<'_> {
+impl TlsWriteStream<'_> {
     fn socket(&self) -> &Socket {
-        &self.stream.inner
+        &self.socket.inner
     }
 
     impl_write!();
 }
 
-crate::embedded_io_macros::impl_error_trait!(TcpWriteStream<'a>, Error, <'a>);
-crate::embedded_io_macros::impl_write_trait!(TcpWriteStream<'a>, <'a>);
+crate::embedded_io_macros::impl_error_trait!(TlsWriteStream<'a>, Error, <'a>);
+crate::embedded_io_macros::impl_write_trait!(TlsWriteStream<'a>, <'a>);
 
-/// An owned read half of a TCP stream
-pub struct OwnedTcpReadStream {
+/// An owned read half of an acrypted TCP stream
+pub struct OwnedTlsReadStream {
     stream: SplitSocketHandle,
 }
 
-impl OwnedTcpReadStream {
+impl OwnedTlsReadStream {
     fn socket(&self) -> &Socket {
         &self.stream
     }
@@ -234,15 +295,15 @@ impl OwnedTcpReadStream {
     }
 }
 
-crate::embedded_io_macros::impl_error_trait!(OwnedTcpReadStream, Error, <>);
-crate::embedded_io_macros::impl_read_trait!(OwnedTcpReadStream, <>);
+crate::embedded_io_macros::impl_error_trait!(OwnedTlsReadStream, Error, <>);
+crate::embedded_io_macros::impl_read_trait!(OwnedTlsReadStream, <>);
 
-/// An owned write half of a TCP stream
-pub struct OwnedTcpWriteStream {
+/// An owned write half of an encrypted TCP stream
+pub struct OwnedTlsWriteStream {
     stream: SplitSocketHandle,
 }
 
-impl OwnedTcpWriteStream {
+impl OwnedTlsWriteStream {
     fn socket(&self) -> &Socket {
         &self.stream
     }
@@ -257,5 +318,5 @@ impl OwnedTcpWriteStream {
     }
 }
 
-crate::embedded_io_macros::impl_error_trait!(OwnedTcpWriteStream, Error, <>);
-crate::embedded_io_macros::impl_write_trait!(OwnedTcpWriteStream, <>);
+crate::embedded_io_macros::impl_error_trait!(OwnedTlsWriteStream, Error, <>);
+crate::embedded_io_macros::impl_write_trait!(OwnedTlsWriteStream, <>);

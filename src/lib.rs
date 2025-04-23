@@ -17,6 +17,7 @@ mod at_notifications;
 mod cancellation;
 mod dns;
 mod dtls_socket;
+pub(crate) mod embedded_io_macros;
 mod error;
 pub mod ffi;
 mod gnss;
@@ -25,10 +26,10 @@ mod lte_link;
 mod sms;
 pub(crate) mod socket;
 mod tcp_stream;
+mod tls_stream;
 mod udp_socket;
 pub(crate) mod waker_node_list;
 
-pub use no_std_net;
 pub use nrfxlib_sys;
 
 pub use at::*;
@@ -40,7 +41,10 @@ pub use error::Error;
 pub use gnss::*;
 pub use lte_link::LteLink;
 pub use sms::*;
+pub use socket::CipherSuite;
+pub use socket::PeerVerification;
 pub use tcp_stream::*;
+pub use tls_stream::*;
 pub use udp_socket::*;
 
 #[cfg(feature = "nrf9160")]
@@ -67,7 +71,7 @@ type WrappedHeap = Mutex<RefCell<Option<Heap>>>;
 static LIBRARY_ALLOCATOR: WrappedHeap = Mutex::new(RefCell::new(None));
 
 /// Our transmit heap.
-
+///
 /// We initalise this later using a special region of shared memory that can be
 /// seen by the Cortex-M33 and the modem CPU.
 static TX_ALLOCATOR: WrappedHeap = Mutex::new(RefCell::new(None));
@@ -107,6 +111,11 @@ pub async fn init_with_custom_layout(
         return Err(Error::BadMemoryLayout);
     }
 
+    #[cfg(feature = "modem-trace")]
+    if memory_layout.trace_area_size == 0 {
+        return Err(Error::BadMemoryLayout);
+    }
+
     // The modem is only certified when the DC/DC converter is enabled and it isn't by default
     unsafe {
         (*pac::REGULATORS_NS::PTR)
@@ -115,12 +124,14 @@ pub async fn init_with_custom_layout(
     }
 
     unsafe {
+        const HEAP_SIZE: usize = 1024;
         /// Allocate some space in global data to use as a heap.
-        static mut HEAP_MEMORY: [u32; 1024] = [0u32; 1024];
-        let heap_start = HEAP_MEMORY.as_ptr() as *mut u8;
-        let heap_size = HEAP_MEMORY.len() * core::mem::size_of::<u32>();
+        static mut HEAP_MEMORY: [u32; HEAP_SIZE] = [0u32; HEAP_SIZE];
+        let heap_start = &raw mut HEAP_MEMORY;
+        let heap_size = HEAP_SIZE * core::mem::size_of::<u32>();
         critical_section::with(|cs| {
-            *LIBRARY_ALLOCATOR.borrow(cs).borrow_mut() = Some(Heap::new(heap_start, heap_size))
+            *LIBRARY_ALLOCATOR.borrow(cs).borrow_mut() =
+                Some(Heap::new(heap_start.cast::<u8>(), heap_size))
         });
     }
 
@@ -172,6 +183,10 @@ pub async fn init_with_custom_layout(
     // OK, let's start the library
     unsafe { nrfxlib_sys::nrf_modem_init(PARAMS.get()) }.into_result()?;
 
+    // Start tracing
+    #[cfg(feature = "modem-trace")]
+    at::send_at::<0>("AT%XMODEMTRACE=1,2").await?;
+
     // Initialize AT notifications
     at_notifications::initialize()?;
 
@@ -193,10 +208,46 @@ pub async fn init_with_custom_layout(
     }
 
     let mut buffer = [0; 64];
-    mode.create_at_command(&mut buffer)?;
-    at::send_at_bytes::<0>(&buffer).await?;
+    let command = mode.create_at_command(&mut buffer)?;
+    at::send_at_bytes::<0>(command).await?;
 
     mode.setup_psm().await?;
+
+    Ok(())
+}
+
+/// Fetch traces from the modem
+///
+/// Make sure to enable the `modem-trace` feature. Call this function regularly
+/// to ensure the trace buffer doesn't overflow.
+///
+/// `cb` will be called for every chunk of tracing data.
+#[cfg(feature = "modem-trace")]
+pub async fn fetch_traces(cb: impl AsyncFn(&[u8])) -> Result<(), Error> {
+    let mut frags: *mut nrfxlib_sys::nrf_modem_trace_data = core::ptr::null_mut();
+    let mut nfrags = 0;
+
+    let res = unsafe {
+        nrfxlib_sys::nrf_modem_trace_get(
+            &mut frags,
+            &mut nfrags,
+            nrfxlib_sys::NRF_MODEM_OS_NO_WAIT as i32,
+        )
+    };
+
+    if res != 0 {
+        return Err(Error::NrfError(res as isize));
+    }
+
+    // SAFETY: if nrf_modem_trace_get returns 0, frags is a valid pointer to the start of an array of size nfrags.
+    let frags = unsafe { core::slice::from_raw_parts(frags, nfrags) };
+    for nrfxlib_sys::nrf_modem_trace_data { data, len } in frags {
+        let data = unsafe { core::slice::from_raw_parts(*data as *mut u8, *len) };
+        cb(data).await;
+        unsafe {
+            nrfxlib_sys::nrf_modem_trace_processed(*len);
+        }
+    }
 
     Ok(())
 }
@@ -204,9 +255,9 @@ pub async fn init_with_custom_layout(
 /// The memory layout used by the modem library.
 ///
 /// The full range needs to be in the lower 128k of ram.
-/// This also contains the fixed [nrfxlib_sys::NRF_MODEM_SHMEM_CTRL_SIZE].
+/// This also contains the fixed [nrfxlib_sys::NRF_MODEM_CELLULAR_SHMEM_CTRL_SIZE].
 ///
-/// Nordic guide: https://developer.nordicsemi.com/nRF_Connect_SDK/doc/2.4.1/nrfxlib/nrf_modem/doc/architecture.html#shared-memory-configuration
+/// Nordic guide: <https://developer.nordicsemi.com/nRF_Connect_SDK/doc/2.4.1/nrfxlib/nrf_modem/doc/architecture.html#shared-memory-configuration>
 pub struct MemoryLayout {
     /// The start of the memory area
     pub base_address: u32,
@@ -224,8 +275,11 @@ impl Default for MemoryLayout {
             base_address: 0x2001_0000,
             tx_area_size: 0x2000,
             rx_area_size: 0x2000,
-            // Trace is not implemented yet
-            trace_area_size: 0,
+            trace_area_size: if cfg!(feature = "modem-trace") {
+                0x2000
+            } else {
+                0
+            },
         }
     }
 }

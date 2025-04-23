@@ -39,6 +39,70 @@ pub enum Error {
     /// The given memory layout falls outside of the acceptable range
     BadMemoryLayout,
     ModemAlreadyInitialized,
+    /// The modem has a maximum packet size of 2kb when receiving TLS packets
+    TlsPacketTooBig,
+    /// tcp and udp TLS connections require at least one security tag to identify the server certificate
+    NoSecurityTag,
+    #[cfg(feature = "dns-async")]
+    DomainNameTooLong,
+    #[cfg(feature = "dns-async")]
+    DnsCacheOverflow,
+    #[cfg(feature = "dns-async")]
+    DnsHeaderBufferOverflow,
+    #[cfg(feature = "dns-async")]
+    DnsQuestionBufferOverflow,
+    #[cfg(feature = "dns-async")]
+    DnsSocketTimeout,
+    #[cfg(feature = "dns-async")]
+    DnsSocketError,
+    #[cfg(feature = "dns-async")]
+    DnsParseFailed,
+}
+
+impl embedded_io_async::Error for Error {
+    fn kind(&self) -> embedded_io_async::ErrorKind {
+        match self {
+            Error::ModemNotInitialized => embedded_io_async::ErrorKind::Other,
+            Error::GnssAlreadyTaken => embedded_io_async::ErrorKind::Other,
+            Error::NrfError(_) => embedded_io_async::ErrorKind::Other,
+            Error::BufferTooSmall(_) => embedded_io_async::ErrorKind::OutOfMemory,
+            Error::OutOfMemory => embedded_io_async::ErrorKind::OutOfMemory,
+            Error::AtParseError(_) => embedded_io_async::ErrorKind::Other,
+            Error::InvalidSystemModeConfig => embedded_io_async::ErrorKind::Other,
+            Error::StringNotNulTerminated => embedded_io_async::ErrorKind::InvalidInput,
+            Error::Utf8Error => embedded_io_async::ErrorKind::InvalidInput,
+            Error::LteRegistrationDenied => embedded_io_async::ErrorKind::Other,
+            Error::SimFailure => embedded_io_async::ErrorKind::Other,
+            Error::UnexpectedAtResponse => embedded_io_async::ErrorKind::Other,
+            Error::HostnameNotAscii => embedded_io_async::ErrorKind::InvalidInput,
+            Error::HostnameTooLong => embedded_io_async::ErrorKind::InvalidInput,
+            Error::AddressNotFound => embedded_io_async::ErrorKind::Other,
+            Error::SocketOptionError(_) => embedded_io_async::ErrorKind::Other,
+            Error::OperationCancelled => embedded_io_async::ErrorKind::Other,
+            Error::SmsNumberNotAscii => embedded_io_async::ErrorKind::Other,
+            Error::Disconnected => embedded_io_async::ErrorKind::ConnectionReset,
+            Error::TooManyLteLinks => embedded_io_async::ErrorKind::Other,
+            Error::InternalRuntimeMutexLocked => embedded_io_async::ErrorKind::Other,
+            Error::BadMemoryLayout => embedded_io_async::ErrorKind::Other,
+            Error::ModemAlreadyInitialized => embedded_io_async::ErrorKind::Other,
+            Error::TlsPacketTooBig => embedded_io_async::ErrorKind::Other,
+            Error::NoSecurityTag => embedded_io_async::ErrorKind::Other,
+            #[cfg(feature = "dns-async")]
+            Error::DomainNameTooLong => embedded_io_async::ErrorKind::InvalidInput,
+            #[cfg(feature = "dns-async")]
+            Error::DnsCacheOverflow => embedded_io_async::ErrorKind::Other,
+            #[cfg(feature = "dns-async")]
+            Error::DnsHeaderBufferOverflow => embedded_io_async::ErrorKind::Other,
+            #[cfg(feature = "dns-async")]
+            Error::DnsQuestionBufferOverflow => embedded_io_async::ErrorKind::Other,
+            #[cfg(feature = "dns-async")]
+            Error::DnsSocketTimeout => embedded_io_async::ErrorKind::TimedOut,
+            #[cfg(feature = "dns-async")]
+            Error::DnsSocketError => embedded_io_async::ErrorKind::Other,
+            #[cfg(feature = "dns-async")]
+            Error::DnsParseFailed => embedded_io_async::ErrorKind::Other,
+        }
+    }
 }
 
 pub trait ErrorSource {
