@@ -17,7 +17,11 @@ mod at_notifications;
 mod cancellation;
 mod dns;
 mod dtls_socket;
+#[cfg(feature = "embassy-net")]
+pub mod embassy_net_modem;
 pub(crate) mod embedded_io_macros;
+#[cfg(feature = "embedded-nal-async")]
+mod embedded_nal_async;
 mod error;
 pub mod ffi;
 mod gnss;
@@ -28,6 +32,7 @@ pub(crate) mod socket;
 mod tcp_stream;
 mod tls_stream;
 mod udp_socket;
+mod uicc_link;
 pub(crate) mod waker_node_list;
 
 pub use nrfxlib_sys;
@@ -37,6 +42,8 @@ pub use at_notifications::AtNotificationStream;
 pub use cancellation::CancellationToken;
 pub use dns::*;
 pub use dtls_socket::*;
+#[cfg(feature = "embedded-nal-async")]
+pub use embedded_nal_async::*;
 pub use error::Error;
 pub use gnss::*;
 pub use lte_link::LteLink;
@@ -46,6 +53,7 @@ pub use socket::PeerVerification;
 pub use tcp_stream::*;
 pub use tls_stream::*;
 pub use udp_socket::*;
+pub use uicc_link::UiccLink;
 
 #[cfg(feature = "nrf9160")]
 use nrf9160_pac as pac;
@@ -80,18 +88,34 @@ pub(crate) static MODEM_RUNTIME_STATE: RuntimeState = RuntimeState::new();
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Start the NRF Modem library
-pub async fn init(mode: SystemMode) -> Result<(), Error> {
-    init_with_custom_layout(mode, Default::default()).await
+///
+/// With the os_irq feature enabled, you need to specify the OS scheduled IRQ number.
+/// The modem's IPC interrupt should be higher than the os irq. (IPC should pre-empt the executor)
+pub async fn init(mode: SystemMode, #[cfg(feature = "os-irq")] os_irq: u8) -> Result<(), Error> {
+    init_with_custom_layout(
+        mode,
+        Default::default(),
+        #[cfg(feature = "os-irq")]
+        os_irq,
+    )
+    .await
 }
 
 /// Start the NRF Modem library with a manually specified memory layout
+///
+/// With the os_irq feature enabled, you need to specify the OS scheduled IRQ number.
+/// The modem's IPC interrupt should be higher than the os irq. (IPC should pre-empt the executor)
 pub async fn init_with_custom_layout(
     mode: SystemMode,
     memory_layout: MemoryLayout,
+    #[cfg(feature = "os-irq")] os_irq: u8,
 ) -> Result<(), Error> {
     if INITIALIZED.fetch_or(true, Ordering::SeqCst) {
         return Err(Error::ModemAlreadyInitialized);
     }
+
+    #[cfg(feature = "os-irq")]
+    ffi::OS_IRQ.store(os_irq, Ordering::Relaxed);
 
     const SHARED_MEMORY_RANGE: Range<u32> = 0x2000_0000..0x2002_0000;
 
@@ -399,14 +423,24 @@ pub async fn configure_gnss_on_pca10090ns() -> Result<(), Error> {
 }
 
 struct RuntimeState {
-    state: embassy_sync::mutex::Mutex<CriticalSectionRawMutex, (bool, u16)>,
+    state: embassy_sync::mutex::Mutex<CriticalSectionRawMutex, RuntimeStateInner>,
     error: AtomicBool,
+}
+
+struct RuntimeStateInner {
+    gps_active: bool,
+    lte_link_count: u16,
+    uicc_link_count: u16,
 }
 
 impl RuntimeState {
     const fn new() -> Self {
         Self {
-            state: embassy_sync::mutex::Mutex::new((false, 0)),
+            state: embassy_sync::mutex::Mutex::new(RuntimeStateInner {
+                gps_active: false,
+                lte_link_count: 0,
+                uicc_link_count: 0,
+            }),
             error: AtomicBool::new(false),
         }
     }
@@ -414,13 +448,13 @@ impl RuntimeState {
     pub(crate) async fn activate_gps(&self) -> Result<(), Error> {
         let mut state = self.state.lock().await;
 
-        if state.0 {
+        if state.gps_active {
             return Err(Error::GnssAlreadyTaken);
         }
 
         ModemActivation::Gnss.act_on_modem().await?;
 
-        state.0 = true;
+        state.gps_active = true;
 
         Ok(())
     }
@@ -428,17 +462,17 @@ impl RuntimeState {
     pub(crate) async fn deactivate_gps(&self) -> Result<(), Error> {
         let mut state = self.state.lock().await;
 
-        if !state.0 {
+        if !state.gps_active {
             panic!("Can't deactivate an inactive gps");
         }
 
-        if state.1 == 0 {
+        if state.lte_link_count == 0 && state.uicc_link_count == 0 {
             ModemDeactivation::Everything.act_on_modem().await?;
         } else {
             ModemDeactivation::OnlyGnss.act_on_modem().await?;
         }
 
-        state.0 = false;
+        state.gps_active = false;
 
         Ok(())
     }
@@ -449,17 +483,17 @@ impl RuntimeState {
             .try_lock()
             .map_err(|_| Error::InternalRuntimeMutexLocked)?;
 
-        if !state.0 {
+        if !state.gps_active {
             panic!("Can't deactivate an inactive gps");
         }
 
-        if state.1 == 0 {
+        if state.lte_link_count == 0 && state.uicc_link_count == 0 {
             ModemDeactivation::Everything.act_on_modem_blocking()?;
         } else {
             ModemDeactivation::OnlyGnss.act_on_modem_blocking()?;
         }
 
-        state.0 = false;
+        state.gps_active = false;
 
         Ok(())
     }
@@ -467,15 +501,15 @@ impl RuntimeState {
     pub(crate) async fn activate_lte(&self) -> Result<(), Error> {
         let mut state = self.state.lock().await;
 
-        if state.1 == u16::MAX {
+        if state.lte_link_count == u16::MAX {
             return Err(Error::TooManyLteLinks);
         }
 
-        if state.1 == 0 {
+        if state.lte_link_count == 0 {
             ModemActivation::Lte.act_on_modem().await?;
         }
 
-        state.1 += 1;
+        state.lte_link_count += 1;
 
         Ok(())
     }
@@ -483,23 +517,22 @@ impl RuntimeState {
     pub(crate) async fn deactivate_lte(&self) -> Result<(), Error> {
         let mut state = self.state.lock().await;
 
-        if state.1 == 0 {
+        if state.lte_link_count == 0 {
             panic!("Can't deactivate an inactive lte");
         }
 
-        if state.1 == 1 {
-            if state.0 {
-                ModemDeactivation::OnlyLte
+        if state.lte_link_count == 1 {
+            if !state.gps_active && state.uicc_link_count == 0 {
+                ModemDeactivation::Everything.act_on_modem().await?;
             } else {
-                ModemDeactivation::Everything
+                ModemDeactivation::OnlyLte.act_on_modem().await?;
+                if state.uicc_link_count == 0 {
+                    ModemDeactivation::OnlyUicc.act_on_modem().await?;
+                }
             }
-        } else {
-            ModemDeactivation::Nothing
         }
-        .act_on_modem()
-        .await?;
 
-        state.1 -= 1;
+        state.lte_link_count -= 1;
 
         Ok(())
     }
@@ -510,13 +543,79 @@ impl RuntimeState {
             .try_lock()
             .map_err(|_| Error::InternalRuntimeMutexLocked)?;
 
-        if state.1 == 0 {
+        if state.lte_link_count == 0 {
             panic!("Can't deactivate an inactive lte");
         }
 
-        if state.1 == 1 {
-            if state.0 {
-                ModemDeactivation::OnlyLte
+        if state.lte_link_count == 1 {
+            if !state.gps_active && state.uicc_link_count == 0 {
+                ModemDeactivation::Everything.act_on_modem_blocking()?;
+            } else {
+                ModemDeactivation::OnlyLte.act_on_modem_blocking()?;
+                if state.uicc_link_count == 0 {
+                    ModemDeactivation::OnlyUicc.act_on_modem_blocking()?;
+                }
+            }
+        }
+
+        state.lte_link_count -= 1;
+
+        Ok(())
+    }
+
+    pub(crate) async fn activate_uicc(&self) -> Result<(), Error> {
+        let mut state = self.state.lock().await;
+
+        if state.uicc_link_count == u16::MAX {
+            return Err(Error::TooManyUiccLinks);
+        }
+
+        if state.uicc_link_count == 0 {
+            ModemActivation::Uicc.act_on_modem().await?;
+        }
+
+        state.uicc_link_count += 1;
+
+        Ok(())
+    }
+
+    pub(crate) async fn deactivate_uicc(&self) -> Result<(), Error> {
+        let mut state = self.state.lock().await;
+
+        if state.uicc_link_count == 0 {
+            panic!("Can't deactivate an inactive UICC");
+        }
+
+        if state.uicc_link_count == 1 {
+            if state.gps_active || state.lte_link_count > 0 {
+                ModemDeactivation::OnlyUicc
+            } else {
+                ModemDeactivation::Everything
+            }
+        } else {
+            ModemDeactivation::Nothing
+        }
+        .act_on_modem()
+        .await?;
+
+        state.uicc_link_count -= 1;
+
+        Ok(())
+    }
+
+    pub(crate) fn deactivate_uicc_blocking(&self) -> Result<(), Error> {
+        let mut state = self
+            .state
+            .try_lock()
+            .map_err(|_| Error::InternalRuntimeMutexLocked)?;
+
+        if state.uicc_link_count == 0 {
+            panic!("Can't deactivate an inactive UICC");
+        }
+
+        if state.uicc_link_count == 1 {
+            if state.gps_active || state.lte_link_count > 0 {
+                ModemDeactivation::OnlyUicc
             } else {
                 ModemDeactivation::Everything
             }
@@ -525,7 +624,7 @@ impl RuntimeState {
         }
         .act_on_modem_blocking()?;
 
-        state.1 -= 1;
+        state.uicc_link_count -= 1;
 
         Ok(())
     }
@@ -547,8 +646,9 @@ impl RuntimeState {
             .is_ok()
         {
             ModemDeactivation::Everything.act_on_modem().await?;
-            state.0 = false;
-            state.1 = 0;
+            state.gps_active = false;
+            state.lte_link_count = 0;
+            state.uicc_link_count = 0;
         }
 
         self.error.store(false, Ordering::SeqCst);
@@ -577,6 +677,7 @@ pub async unsafe fn reset_runtime_state() -> Result<(), Error> {
 enum ModemDeactivation {
     OnlyGnss,
     OnlyLte,
+    OnlyUicc,
     Nothing,
     Everything,
 }
@@ -596,6 +697,11 @@ impl ModemDeactivation {
 
                 // Turn off the network side of the modem
                 at::send_at::<0>("AT+CFUN=20").await?;
+                // Do not turn of UICC, let the caller do that.
+            }
+            ModemDeactivation::OnlyUicc => {
+                #[cfg(feature = "defmt")]
+                defmt::debug!("Disabling UICC");
                 // Turn off the UICC
                 at::send_at::<0>("AT+CFUN=40").await?;
             }
@@ -625,6 +731,11 @@ impl ModemDeactivation {
 
                 // Turn off the network side of the modem
                 at::send_at_blocking::<0>("AT+CFUN=20")?;
+                // Do not turn of UICC, let the caller do that.
+            }
+            ModemDeactivation::OnlyUicc => {
+                #[cfg(feature = "defmt")]
+                defmt::debug!("Disabling UICC");
                 // Turn off the UICC
                 at::send_at_blocking::<0>("AT+CFUN=40")?;
             }
@@ -644,6 +755,7 @@ impl ModemDeactivation {
 enum ModemActivation {
     Lte,
     Gnss,
+    Uicc,
 }
 
 impl ModemActivation {
@@ -665,6 +777,15 @@ impl ModemActivation {
                 at::send_at::<0>("AT+CEPPI=1").await?;
                 // Activate LTE without changing GNSS
                 at::send_at::<0>("AT+CFUN=21").await?;
+            }
+            ModemActivation::Uicc => {
+                #[cfg(feature = "defmt")]
+                defmt::debug!("Enabling UICC");
+
+                // Set UICC low power mode
+                at::send_at::<0>("AT+CEPPI=1").await?;
+                // Activate LTE without changing GNSS
+                at::send_at::<0>("AT+CFUN=41").await?;
             }
         }
 

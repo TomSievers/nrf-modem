@@ -35,6 +35,7 @@ pub enum Error {
     SmsNumberNotAscii,
     Disconnected,
     TooManyLteLinks,
+    TooManyUiccLinks,
     InternalRuntimeMutexLocked,
     /// The given memory layout falls outside of the acceptable range
     BadMemoryLayout,
@@ -57,6 +58,8 @@ pub enum Error {
     DnsSocketError,
     #[cfg(feature = "dns-async")]
     DnsParseFailed,
+    #[cfg(feature = "embedded-nal-async")]
+    ReverseDnsLookupNotSupported,
 }
 
 impl embedded_io_async::Error for Error {
@@ -82,6 +85,7 @@ impl embedded_io_async::Error for Error {
             Error::SmsNumberNotAscii => embedded_io_async::ErrorKind::Other,
             Error::Disconnected => embedded_io_async::ErrorKind::ConnectionReset,
             Error::TooManyLteLinks => embedded_io_async::ErrorKind::Other,
+            Error::TooManyUiccLinks => embedded_io_async::ErrorKind::Other,
             Error::InternalRuntimeMutexLocked => embedded_io_async::ErrorKind::Other,
             Error::BadMemoryLayout => embedded_io_async::ErrorKind::Other,
             Error::ModemAlreadyInitialized => embedded_io_async::ErrorKind::Other,
@@ -101,6 +105,8 @@ impl embedded_io_async::Error for Error {
             Error::DnsSocketError => embedded_io_async::ErrorKind::Other,
             #[cfg(feature = "dns-async")]
             Error::DnsParseFailed => embedded_io_async::ErrorKind::Other,
+            #[cfg(feature = "embedded-nal-async")]
+            Error::ReverseDnsLookupNotSupported => embedded_io_async::ErrorKind::Unsupported,
         }
     }
 }

@@ -72,6 +72,8 @@ But it's easy to miss something, so this is a 'best effort' guarantee only.
 
 The model library from Nordic needs some memory for its state and buffers. You need to reserve some memory in your memory.x file for the modem:
 
+For secure mode:
+
 ```ld
 MEMORY
 {
@@ -81,12 +83,24 @@ MEMORY
 }
 ```
 
+For non-secure mode with TFM (Trusted Firmware-M):
+
+```ld
+MEMORY {
+    /* Trusted Firmware-M (TF-M) is flashed at the start */
+    FLASH : ORIGIN = 0x00008000, LENGTH = 992K
+    RAM   : ORIGIN = 0x2000C568, LENGTH = 206K
+}
+```
+
+Note: When running in non-secure mode with TFM, you must flash TFM firmware to the device before your application. TFM configures the secure and non-secure execution environments and then loads the non-secure application. The memory layout ensures that TFM is placed in the secure region (0x00000000 - 0x00008000) while your application starts at 0x00008000. See [Embassy nRF9151 non-secure example](https://github.com/embassy-rs/embassy/blob/main/examples/nrf9151/ns) for more details.
+
 ### Secure and nonsecure operation
 
 Warning: The underlying C library, `libmodem`, assumes and 'officially' requires to be run in the non-secure mode of the chip.
 So that's the only official support this wrapper can deliver too.
 
-The library *can* be used in secure contexts, though. Some additional initialization is necessary for the secure context because the underlying libmodem C library by Nordic expects access to nonsecure memory and resources. If you do not use the memory layout defined above, you need to adapt the addresses below. 
+The library *can* be used in secure contexts, though. Some additional initialization is necessary for the secure context because the underlying libmodem C library by Nordic expects access to nonsecure memory and resources. If you do not use the memory layout defined above, you need to adapt the addresses below.
 
 For running in the secure context on some chips and version and at your own risk and peril:
 ```rust,ignore
@@ -255,3 +269,15 @@ Before this can run, you need to store the required certificate in a security ta
 If you're facing problems with this library, you have the following tools for debugging:
 - Enable the features `modem-log` and `defmt`: This will enable logging for Nordic's nrfxlib modem driver.
 - Enable the feature `modem-trace` and call the function `nrf_modem::fetch_trace()` regularly. This function is called with an async closure handing over chunks of tracing data. Write this data to a UART and use Nordic's nRF Connect tool to collect and interprete the tracing data.
+
+## Embassy-net
+
+The `embassy-net` feature enables a wrapper to be able to use the modem via embassy-net.
+
+An usage example is avaialble in `examples/embassy-net-tcp-client`.
+
+## embedded-nal-async
+
+The `embedded-nal-async` feature enables a `ModemNal` struct that implements traits from `embedded-nal-async`.
+
+Support is currently limited to DNS and unencrypted TCP.

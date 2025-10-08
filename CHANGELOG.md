@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.9.0 (2025-10-01)
+
+- *Breaking*: Made the `embedded_nal_async` module private that was accidentally left public
+- Added UiccLink to be able to activate the sim card in a controlled way. This allows some AT commands to run without fully turning on the modem
+
+## 0.8.0 (2025-09-17)
+
+- *Breaking*: Update to embassy-time to 0.5
+- Added embassy-net wrapper (behind feature flag)
+- Allow restricting address type of DNS queries with `resolve_dns()`
+- Add optional support for the `TcpConnect` and `Dns` traits from `embedded-nal-async`
+
+## 0.7.3 (2025-07-23)
+
+- Added os-irq feature, adding compatibility with interrupt executors.
+
+## 0.7.2 (2025-05-25)
+
+- Fixed bug that clears GNSS_NOTICED_EVENTS after callback
+
 ## 0.7.1 (2025-04-13)
 
 - Updated to nrfxlib-sys 2.9.2 which should make the docs compile again
