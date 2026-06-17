@@ -1,6 +1,8 @@
 use crate::{
     error::Error,
-    socket::{Socket, SocketFamily, SocketProtocol, SocketType, SplitSocketHandle},
+    socket::{
+        Socket, SocketDirection, SocketFamily, SocketProtocol, SocketType, SplitSocketHandle,
+    },
     CancellationToken, LteLink,
 };
 use core::net::SocketAddr;
@@ -127,6 +129,11 @@ impl UdpSocket {
 
     impl_receive_from!();
     impl_send_to!();
+
+    /// Poll the socket for readiness
+    pub async fn poll(&self, direction: SocketDirection) -> Result<(), Error> {
+        self.socket().poll(direction).await
+    }
 
     /// Deactivates the socket and the LTE link.
     /// A normal drop will do the same thing, but blocking.

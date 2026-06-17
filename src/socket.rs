@@ -100,7 +100,7 @@ unsafe extern "C" fn socket_poll_callback(pollfd: *mut nrfxlib_sys::nrf_pollfd) 
 /// Used as a identifier for wakers when a socket is split into RX/TX halves
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-enum SocketDirection {
+pub enum SocketDirection {
     /// Neither option
     Neither,
     /// RX
@@ -718,6 +718,42 @@ impl Socket {
         } else {
             Ok(())
         }
+    }
+
+    pub async fn poll(&self, direction: SocketDirection) -> Result<(), Error> {
+        core::future::poll_fn(|cx| {
+            let mut pollfd = nrfxlib_sys::nrf_pollfd {
+                fd: self.fd,
+                events: match direction {
+                    SocketDirection::In => nrfxlib_sys::NRF_POLLIN as i16,
+                    SocketDirection::Out => nrfxlib_sys::NRF_POLLOUT as i16,
+                    SocketDirection::Either => {
+                        (nrfxlib_sys::NRF_POLLIN | nrfxlib_sys::NRF_POLLOUT) as i16
+                    }
+                    SocketDirection::Neither => 0,
+                },
+                revents: 0,
+            };
+
+            register_socket_waker(cx.waker().clone(), self.fd, direction);
+
+            let mut result = unsafe { nrfxlib_sys::nrf_poll(&mut pollfd as *mut _, 1, 0) } as isize;
+
+            if result == -1 {
+                result = get_last_error().abs().neg();
+            }
+
+            const NRF_EWOULDBLOCK: isize = -(nrfxlib_sys::NRF_EWOULDBLOCK as isize);
+            const NRF_ENOTCONN: isize = -(nrfxlib_sys::NRF_ENOTCONN as isize);
+
+            match result {
+                1.. => Poll::Ready(Ok(())),
+                NRF_ENOTCONN => Poll::Ready(Err(Error::Disconnected)),
+                NRF_EWOULDBLOCK => Poll::Pending,
+                error => Poll::Ready(Err(Error::NrfError(error))),
+            }
+        })
+        .await
     }
 
     /// Deactivates the socket and the LTE link.

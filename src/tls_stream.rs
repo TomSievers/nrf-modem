@@ -2,8 +2,8 @@ use crate::{
     dns,
     error::Error,
     socket::{
-        CipherSuite, PeerVerification, Socket, SocketFamily, SocketOption, SocketProtocol,
-        SocketType, SplitSocketHandle,
+        CipherSuite, PeerVerification, Socket, SocketDirection, SocketFamily, SocketOption,
+        SocketProtocol, SocketType, SplitSocketHandle,
     },
     CancellationToken, LteLink,
 };
@@ -236,6 +236,11 @@ impl TlsStream {
     pub async fn deactivate(self) -> Result<(), Error> {
         self.inner.deactivate().await?;
         Ok(())
+    }
+
+    /// Poll the socket for readiness
+    pub async fn poll(&self, direction: SocketDirection) -> Result<(), Error> {
+        self.socket().poll(direction).await
     }
 }
 

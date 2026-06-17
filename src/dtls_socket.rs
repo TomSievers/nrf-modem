@@ -1,7 +1,10 @@
 use crate::{
     dns,
     error::Error,
-    socket::{Socket, SocketFamily, SocketOption, SocketProtocol, SocketType, SplitSocketHandle},
+    socket::{
+        Socket, SocketDirection, SocketFamily, SocketOption, SocketProtocol, SocketType,
+        SplitSocketHandle,
+    },
     CancellationToken, CipherSuite, PeerVerification,
 };
 
@@ -138,6 +141,11 @@ impl DtlsSocket {
             DtlsReceiveSocket { socket: self },
             DtlsSendSocket { socket: self },
         )
+    }
+
+    /// Poll the socket for readiness
+    pub async fn poll(&self, direction: SocketDirection) -> Result<(), Error> {
+        self.socket().poll(direction).await
     }
 
     impl_receive_from!();

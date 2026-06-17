@@ -1,6 +1,8 @@
 use crate::{
     error::Error,
-    socket::{Socket, SocketFamily, SocketProtocol, SocketType, SplitSocketHandle},
+    socket::{
+        Socket, SocketDirection, SocketFamily, SocketProtocol, SocketType, SplitSocketHandle,
+    },
     CancellationToken, LteLink,
 };
 use core::net::SocketAddr;
@@ -175,6 +177,11 @@ impl TcpStream {
     pub async fn deactivate(self) -> Result<(), Error> {
         self.inner.deactivate().await?;
         Ok(())
+    }
+
+    /// Poll the socket for readiness
+    pub async fn poll(&self, direction: SocketDirection) -> Result<(), Error> {
+        self.socket().poll(direction).await
     }
 }
 
