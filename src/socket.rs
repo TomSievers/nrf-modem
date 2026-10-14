@@ -747,7 +747,15 @@ impl Socket {
             const NRF_ENOTCONN: isize = -(nrfxlib_sys::NRF_ENOTCONN as isize);
 
             match result {
-                1.. => Poll::Ready(Ok(())),
+                0 => Poll::Pending, // nothing ready; the waker registered above fires from the POLLCB callback
+                1.. => {
+                    let err = (nrfxlib_sys::NRF_POLLERR | nrfxlib_sys::NRF_POLLHUP | nrfxlib_sys::NRF_POLLNVAL) as i16;
+                    if pollfd.revents & err != 0 {
+                        Poll::Ready(Err(Error::Disconnected)) // or map POLLERR/POLLNVAL separately
+                    } else {
+                        Poll::Ready(Ok(()))
+                    }
+                }
                 NRF_ENOTCONN => Poll::Ready(Err(Error::Disconnected)),
                 NRF_EWOULDBLOCK => Poll::Pending,
                 error => Poll::Ready(Err(Error::NrfError(error))),
